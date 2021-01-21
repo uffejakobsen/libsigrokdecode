@@ -3,6 +3,7 @@
 ##
 ## Copyright (C) 2014 Torsten Duwe <duwe@suse.de>
 ## Copyright (C) 2014 Sebastien Bourdelin <sebastien.bourdelin@savoirfairelinux.com>
+## Copyright (C) 2018 Uffe Jakobsen <uffe@uffe.org>
 ##
 ## This program is free software; you can redistribute it and/or modify
 ## it under the terms of the GNU General Public License as published by
@@ -18,33 +19,89 @@
 ## along with this program; if not, see <http://www.gnu.org/licenses/>.
 ##
 
+
 import sigrokdecode as srd
 from collections import deque
+
 
 class SamplerateError(Exception):
     pass
 
+
+#
+#
+#
 def normalize_time(t):
+    fmt_time = "%.0f "
     if abs(t) >= 1.0:
-        return '%.3f s  (%.3f Hz)' % (t, (1/t))
+        return (fmt_time + "s") % (t)
+    elif abs(t) >= 0.001:
+        return (fmt_time + "ms") % (t * 1000.0)
+    elif abs(t) >= 0.000001:
+        return (fmt_time + "μs") % (t * 1000.0 * 1000.0)
+    elif abs(t) >= 0.000000001:
+        return (fmt_time + "ns") % (t * 1000.0 * 1000.0 * 1000.0)
+    elif abs(t) == 0.0:
+        return (fmt_time % (t))
+    return ("%f" % (t))
+
+
+#
+#
+#
+def normalize_freq(t):
+    fmt_freq = "%.3f "
+    if abs(t) >= 1.0:
+        return (fmt_freq + "Hz") % ((1/t))
     elif abs(t) >= 0.001:
         if 1/t/1000 < 1:
-            return '%.3f ms (%.3f Hz)' % (t * 1000.0, (1/t))
+            return (fmt_freq + "Hz") % ((1/t))
         else:
-            return '%.3f ms (%.3f kHz)' % (t * 1000.0, (1/t)/1000)
+            return (fmt_freq + "kHz") % ((1/t)/1000)
     elif abs(t) >= 0.000001:
         if 1/t/1000/1000 < 1:
-            return '%.3f μs (%.3f kHz)' % (t * 1000.0 * 1000.0, (1/t)/1000)
+            return (fmt_freq + "kHz") % ((1/t)/1000)
         else:
-            return '%.3f μs (%.3f MHz)' % (t * 1000.0 * 1000.0, (1/t)/1000/1000)
+            return (fmt_freq + "MHz") % ((1/t)/1000/1000)
     elif abs(t) >= 0.000000001:
         if 1/t/1000/1000/1000:
-            return '%.3f ns (%.3f MHz)' % (t * 1000.0 * 1000.0 * 1000.0, (1/t)/1000/1000)
+            return (fmt_freq + "MHz") % ((1/t)/1000/1000)
         else:
-            return '%.3f ns (%.3f GHz)' % (t * 1000.0 * 1000.0 * 1000.0, (1/t)/1000/1000/1000)
-    else:
-        return '%f' % t
+            return (fmt_freq + "GHz") % ((1/t)/1000/1000/1000)
+    elif abs(t) == 0.0:
+        return (fmt_freq % (t))
+    return ("%f" % (t))
 
+
+#
+#
+#
+def normalize_time_freq(t):
+    fmt_time = "%.3f "
+    fmt_freq = "%.3f "
+    if abs(t) >= 1.0:
+        return (fmt_time + 's  (' + fmt_freq + 'Hz)') % (t, (1/t))
+    elif abs(t) >= 0.001:
+        if 1/t/1000 < 1:
+            return (fmt_time + 'ms (' + fmt_freq + 'Hz)') % (t * 1000.0, (1/t))
+        else:
+            return (fmt_time + 'ms (' + fmt_freq + 'kHz)') % (t * 1000.0, (1/t)/1000)
+    elif abs(t) >= 0.000001:
+        if 1/t/1000/1000 < 1:
+            return (fmt_time + 'μs (' + fmt_freq + 'kHz)') % (t * 1000.0 * 1000.0, (1/t)/1000)
+        else:
+            return (fmt_time + 'μs (' + fmt_freq + 'MHz)') % (t * 1000.0 * 1000.0, (1/t)/1000/1000)
+    elif abs(t) >= 0.000000001:
+        if 1/t/1000/1000/1000:
+            return (fmt_time + 'ns (' + fmt_freq + 'MHz)') % (t * 1000.0 * 1000.0 * 1000.0, (1/t)/1000/1000)
+        else:
+            return (fmt_time + 'ns (' + fmt_freq + 'GHz)') % (t * 1000.0 * 1000.0 * 1000.0, (1/t)/1000/1000/1000)
+    return ('%f' % t)
+
+
+#
+#
+#
 def terse_times(t, fmt):
     # Strictly speaking these variants are not used in the current
     # implementation, but can reduce diffs during future maintenance.
@@ -93,8 +150,11 @@ class Pin:
     (DATA,) = range(1)
 
 class Ann:
-    (TIME, TERSE, AVG, DELTA,) = range(4)
+    (TIME, TERSE, AVG, AVG2, DELTA, DELTA2, SAMPLES2, TIME2, FREQ2) = range(8)
 
+#
+#
+#
 class Decoder(srd.Decoder):
     api_version = 3
     id = 'timing'
@@ -109,16 +169,25 @@ class Decoder(srd.Decoder):
         {'id': 'data', 'name': 'Data', 'desc': 'Data line'},
     )
     annotations = (
+        ('samples', 'Samples'),
         ('time', 'Time'),
         ('terse', 'Terse'),
         ('average', 'Average'),
+        ('freq', 'Freq'),
         ('delta', 'Delta'),
     )
     annotation_rows = (
         ('times', 'Times', (Ann.TIME, Ann.TERSE,)),
         ('averages', 'Averages', (Ann.AVG,)),
         ('deltas', 'Deltas', (Ann.DELTA,)),
+        #####
+        ('samples', 'Samples', (Ann.SAMPLES2,)),
+        ('time', 'Time', (Ann.TIME2,)),
+        ('freq', 'Freq', (Ann.FREQ2,)),
+        ('delta', 'Delta', (Ann.DELTA2,)),
+        ('average', 'Average', (Ann.AVG2,)),
     )
+
     options = (
         { 'id': 'avg_period', 'desc': 'Averaging period', 'default': 100 },
         { 'id': 'edge', 'desc': 'Edges to check',
@@ -129,20 +198,39 @@ class Decoder(srd.Decoder):
           'default': 'full', 'values': ('full', 'terse-auto',
           'terse-s', 'terse-ms', 'terse-us', 'terse-ns', 'terse-ps',
           'samples') },
+        #####
+        {'id': 'edge', 'desc': 'Edges to check', 'default': 'any', 'values': ('any', 'rising', 'falling')},
+        {'id': 'show_samples', 'desc': 'Show sample count', 'default': 'yes', 'values': ('yes', 'no')},
+        {'id': 'show_timing', 'desc': 'Show timing', 'default': 'yes', 'values': ('yes', 'no')},
+        {'id': 'show_freq', 'desc': 'Show frequency', 'default': 'yes', 'values': ('yes', 'no')},
+        {'id': 'show_delta', 'desc': 'Show delta from last', 'default': 'yes', 'values': ('yes', 'no')},
+        {'id': 'show_avg', 'desc': 'Show Averaging period', 'default': 'yes', 'values': ('yes', 'no')},
+        {'id': 'avg_period', 'desc': 'Averaging period', 'default': 100},
     )
 
     def __init__(self):
         self.reset()
+        return
 
     def reset(self):
         self.samplerate = None
+        self.last_samplenum = None
+        self.last_n = deque()
+        self.chunks = 0
+        self.level_changed = False
+        self.last_t = None
+        return
+
 
     def metadata(self, key, value):
         if key == srd.SRD_CONF_SAMPLERATE:
             self.samplerate = value
+        return
 
     def start(self):
         self.out_ann = self.register(srd.OUTPUT_ANN)
+        self.edge = self.options['edge']
+        return
 
     def decode(self):
         if not self.samplerate:
@@ -165,6 +253,7 @@ class Decoder(srd.Decoder):
             if not ss:
                 ss = self.samplenum
                 continue
+####<<<<<<< HEAD
             es = self.samplenum
             sa = es - ss
             t = sa / self.samplerate
@@ -190,5 +279,42 @@ class Decoder(srd.Decoder):
                 cls, txt = Ann.DELTA, normalize_time(t - last_t)
                 self.put(ss, es, self.out_ann, [cls, [txt]])
 
+#####=======
+            samples = self.samplenum - self.last_samplenum
+            t = samples / self.samplerate
+
+            if t > 0:
+                self.last_n.append(t)
+            if len(self.last_n) > self.options['avg_period']:
+                self.last_n.popleft()
+
+            if self.last_t and self.options['show_samples'] == 'yes':
+                self.put(self.last_samplenum, self.samplenum, self.out_ann,
+                         [Ann.SAMPLES2, ["%d" % (samples)]])
+
+            if self.options['show_timing'] == 'yes':
+                self.put(self.last_samplenum, self.samplenum, self.out_ann,
+                         [Ann.TIME2, [normalize_time(t)]])
+
+            if self.options['show_freq'] == 'yes':
+                self.put(self.last_samplenum, self.samplenum, self.out_ann,
+                         [Ann.FREQ2, [normalize_freq(t)]])
+
+            if self.last_t and self.options['show_delta'] == 'yes':
+                self.put(self.last_samplenum, self.samplenum, self.out_ann,
+                         [Ann.DELTA2, [normalize_time(t - self.last_t), normalize_time_freq(t - self.last_t)]])
+
+            if self.options['avg_period'] > 0 and self.options['show_avg'] == 'yes':
+                self.put(self.last_samplenum, self.samplenum, self.out_ann,
+                         [Ann.AVG2, [normalize_time(sum(self.last_n) / len(self.last_n))]])
+
+            self.last_t = t
+            self.last_samplenum = self.samplenum
+#>>>>>>
             last_t = t
             ss = es
+
+        return
+#
+# EOF
+#
